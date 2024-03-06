@@ -1,0 +1,58 @@
+from langchain.llms import OpenAI
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
+from langchain.document_loaders import TextLoader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.vectorstores import FAISS
+from langchain.embeddings import OpenAIEmbeddings
+from transformers import pipeline
+from fastapi import FastAPI
+import os
+
+os.environ["OPENAI_API_KEY"] = "openai_api_key"
+
+app = FastAPI()
+
+loader = TextLoader('resources.txt')
+documents = loader.load()
+text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+texts = text_splitter.split_documents(documents)
+
+embeddings = OpenAIEmbeddings()
+docsearch = FAISS.from_documents(texts, embeddings)
+
+code_llm = OpenAI(temperature=0, model_name="gpt-4-0125-preview")
+general_llm = OpenAI(temperature=0, model_name="gpt-3.5-turbo-0125")
+
+classifier = pipeline("text-classification", model="text-embedding-3-large")
+
+code_prompt = PromptTemplate(
+    input_variables=["question"],
+    template="Responde la siguiente pregunta sobre código:\n\n{question}"
+)
+
+general_prompt = PromptTemplate(
+    input_variables=["question", "context"],
+    template="Responde la siguiente pregunta teórica de programación basándote en el contexto proporcionado:\n\nContexto: {context}\n\nPregunta: {question}\n\nRespuesta:"
+)
+
+code_chain = LLMChain(llm=code_llm, prompt=code_prompt)
+general_chain = LLMChain(llm=general_llm, prompt=general_prompt)
+
+@app.post("/ask")
+def ask_question(question: str):
+    category = classifier(question)[0]['label']
+
+    if category == 'LABEL_1':
+        response = code_chain.run(question)
+    elif category == 'LABEL_2':
+        docs = docsearch.similarity_search(question)
+        if docs:
+            context = " ".join([doc.page_content for doc in docs])
+            response = general_chain.run(question=question, context=context)
+        else:
+            response = "Lo siento, no tengo suficiente información para responder esa pregunta."
+    else:
+        response = "Lo siento, no puedo responder esa pregunta."
+
+    return {"question": question, "response": response}
